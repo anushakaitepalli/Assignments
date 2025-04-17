@@ -1,0 +1,55 @@
+SELECT 
+    request_type,
+    metric,
+    
+    -- Pivot columns using CASE WHEN
+    SUM(CASE WHEN class_id = 'AWS_SCM_SHIPMENT_B_Y_BOOKING' THEN request_count ELSE 0 END) AS AWS_SCM_SHIPMENT_B_Y_BOOKING,
+    SUM(CASE WHEN class_id = 'AWS_SCM_SHIPMENT_STATUS' THEN request_count ELSE 0 END) AS AWS_SCM_SHIPMENT_STATUS,
+    SUM(CASE WHEN class_id = 'AWS_SCM_SHIPPING_REQUEST' THEN request_count ELSE 0 END) AS AWS_SCM_SHIPPING_REQUEST,
+    SUM(CASE WHEN class_id = 'AWS_SCM_SHIPMENT_RACK_BOOKING' THEN request_count ELSE 0 END) AS AWS_SCM_SHIPMENT_RACK_BOOKING
+
+FROM (
+    SELECT 
+        t.request_type, 
+        t.class_id, 
+        COALESCE(d.origin_site, '') || '-' || COALESCE(d.destination_cluster, '') AS metric,
+        COUNT(t.shipping_request_id) AS request_count
+
+    FROM "dev"."ext_caspian_shipments"."raw_shipping_requests" t
+
+    INNER JOIN (
+        SELECT 
+            request_type, 
+            class_id, 
+            shipping_request_id, 
+            MAX(version) AS max_version
+        FROM "dev"."ext_caspian_shipments"."raw_shipping_requests"
+        WHERE (year > 2024 OR (year = 2024 AND CAST(month AS INTEGER) >= 8))
+        GROUP BY request_type, class_id, shipping_request_id
+    ) max_table
+    ON t.request_type = max_table.request_type 
+       AND t.version = max_table.max_version
+       AND t.class_id = max_table.class_id
+       AND t.shipping_request_id = max_table.shipping_request_id
+
+    INNER JOIN (
+        SELECT 
+            b.shipping_request_id,
+            a.origin_site,
+            a.destination_cluster,
+            a.origin_cluster,
+            a.destination_site
+        FROM acl.wbr a
+        LEFT JOIN acl.logistic_attributes b ON a.asset_id = b.asset_id
+        LEFT JOIN acl.logistic_events c ON b.shipment_package_id = c.shipment_package_id
+        WHERE c.prog_type = 'RACK'
+        AND (
+            (a.origin_site = 'QTA-BNA' AND a.destination_cluster IN ('PDX', 'SFO', 'ICN')) OR
+            (a.origin_site = 'QTA-TPE' AND a.destination_cluster IN ('PDX', 'ICN')) OR
+            (a.origin_site = 'SYN-BHX' AND a.destination_cluster IN ('ICN', 'MXP', 'CPT', 'ARN'))
+        )
+    ) d ON d.shipping_request_id = t.shipping_request_id
+
+    GROUP BY t.request_type, t.class_id, d.origin_site, d.destination_cluster
+) pivoted
+GROUP BY request_type, metric;
